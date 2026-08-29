@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Python virtual environment
+backend/venv/
+
+# Uploaded files
+backend/uploads/
+
+# Node dependencies
+frontend/node_modules/
+
+# React/Vite build
+frontend/dist/
+
+# Environment variables / API keys
+.env
+.env.*
+!.env.example
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Ignore duplicate root src folder
+src/
+
+# Ignore duplicate root src folder
+src/
