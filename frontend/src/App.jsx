@@ -1,776 +1,331 @@
-import { useRef, useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import "./App.css";
+import AuthPage from "./components/Auth/AuthPage";
+import TopNavbar from "./components/TopNavbar";
+import Sidebar from "./components/Sidebar";
+import ChatArea from "./components/ChatArea";
+import DocumentModal from "./components/DocumentModal";
+import SettingsModal from "./components/SettingsModal";
+import LightboxModal from "./components/LightboxModal";
 
-function App() {
+import {
+  getCurrentSession,
+  logoutSession
+} from "./services/auth";
+import {
+  checkBackendStatus,
+  getDocuments,
+  askQuery,
+  uploadDocument
+} from "./services/api";
+
+export default function App() {
+  // Authentication State
+  const [user, setUser] = useState(() => getCurrentSession());
+
+  // Theme State ("dark" | "light")
+  const [theme, setTheme] = useState(() => {
+    return localStorage.getItem("accurag_theme") || "dark";
+  });
+
+  // Navigation / Sidebar State
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    return localStorage.getItem("accurag_sidebar_collapsed") === "true";
+  });
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  // Modals
+  const [docModalOpen, setDocModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [lightboxUrl, setLightboxUrl] = useState(null);
+
+  // Backend Health
+  const [backendOnline, setBackendOnline] = useState(false);
+
+  // Document Library & Active Doc
+  const [indexedDocs, setIndexedDocs] = useState([]);
+  const [activeDoc, setActiveDoc] = useState(null);
+
+  // Chat State
   const [question, setQuestion] = useState("");
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [activePage, setActivePage] = useState("home");
-  const [uploading, setUploading] = useState(false);
+  const [answerMode, setAnswerMode] = useState("smart"); // 'smart' | 'document' | 'web'
+  const [explanationMode, setExplanationMode] = useState("detailed"); // 'easy' | 'detailed' | 'exam'
+  const [answerLength, setAnswerLength] = useState("medium"); // 'short' | 'medium' | 'detailed'
+  const [examMarks, setExamMarks] = useState(null); // null | 2 | 5 | 10 | 15
+  const [asking, setAsking] = useState(false);
+  const [askError, setAskError] = useState("");
+  const [currentResult, setCurrentResult] = useState(null);
+  const [activeChatId, setActiveChatId] = useState(null);
+  // Conversation session tracking for follow-up context
+  const conversationIdRef = useRef(null);
 
-  const fileInputRef = useRef(null);
+  // Chat History
+  const [chatHistory, setChatHistory] = useState(() => {
+    try {
+      const saved = localStorage.getItem("accurag_chat_history");
+      return saved
+        ? JSON.parse(saved)
+        : [
+            {
+              id: "hist-demo-1",
+              question: "Explain the symmetric cipher model with a neat diagram.",
+              timestamp: "Earlier",
+              mode: "document",
+            },
+            {
+              id: "hist-demo-2",
+              question: "What are the latest developments in retrieval-augmented generation?",
+              timestamp: "Earlier",
+              mode: "web",
+            },
+          ];
+    } catch {
+      return [];
+    }
+  });
 
-  // Open PDF picker
-  const handleUploadClick = () => {
-    fileInputRef.current.click();
+  // Apply theme to document root
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("accurag_theme", theme);
+  }, [theme]);
+
+  // Persist sidebar collapsed state
+  useEffect(() => {
+    localStorage.setItem("accurag_sidebar_collapsed", sidebarCollapsed);
+  }, [sidebarCollapsed]);
+
+  // Persist chat history
+  useEffect(() => {
+    try {
+      localStorage.setItem("accurag_chat_history", JSON.stringify(chatHistory));
+    } catch (e) {
+      console.error("Could not persist chat history:", e);
+    }
+  }, [chatHistory]);
+
+  // Check backend health & fetch indexed documents on mount
+  useEffect(() => {
+    const initApp = async () => {
+      try {
+        const health = await checkBackendStatus();
+        setBackendOnline(health.online);
+
+        if (health.online) {
+          const docData = await getDocuments();
+          if (docData?.documents && docData.documents.length > 0) {
+            setIndexedDocs(docData.documents);
+            if (!activeDoc) {
+              setActiveDoc(docData.documents[0]);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Backend initialization ping failed:", err);
+        setBackendOnline(false);
+      }
+    };
+    initApp();
+  }, []);
+
+  // Theme Toggle Handler
+  const handleToggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   };
 
-  // Handle PDF selection
- const handleFileChange = async (event) => {
-  const file = event.target.files[0];
+  // Logout Handler
+  const handleLogout = () => {
+    logoutSession();
+    setUser(null);
+  };
 
-  if (!file) return;
-
-  if (file.type !== "application/pdf") {
-    alert("Please select a PDF file.");
-    event.target.value = "";
-    return;
-  }
-
-  try {
-    setUploading(true);
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const response = await fetch("http://127.0.0.1:8000/upload", {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!response.ok) {
-      throw new Error("Upload failed");
-    }
-
-    const data = await response.json();
-
-    console.log("Upload response:", data);
-
-    setSelectedFile(file);
-
-    alert(
-      `PDF uploaded successfully!\n\nPages: ${data.pages}\nText extracted successfully.`
-    );
-  } catch (error) {
-    console.error("Upload error:", error);
-    alert("PDF upload failed. Please check if the backend is running.");
-  } finally {
-    setUploading(false);
-    event.target.value = "";
-  }
-};
-  // New chat
+  // New Chat Handler
   const handleNewChat = () => {
     setQuestion("");
-    setSelectedFile(null);
-    setActivePage("home");
+    setCurrentResult(null);
+    setAskError("");
+    setActiveChatId(null);
+    // Reset conversation session so next question starts fresh
+    conversationIdRef.current = null;
   };
 
-  // Ask question
-  const handleAsk = () => {
-    if (!question.trim()) {
-      return;
+  // Clear History
+  const handleClearHistory = () => {
+    if (window.confirm("Are you sure you want to clear your chat history?")) {
+      setChatHistory([]);
+      localStorage.removeItem("accurag_chat_history");
+    }
+  };
+
+  // Select History Item
+  const handleSelectChat = (item) => {
+    setActiveChatId(item.id);
+    setQuestion(item.question);
+    if (item.fullResult) {
+      setCurrentResult(item.fullResult);
+      if (item.fullResult.mode) setAnswerMode(item.fullResult.mode);
+      if (item.fullResult.explanation_mode) setExplanationMode(item.fullResult.explanation_mode);
+    } else {
+      handleAsk(item.question, item.mode || answerMode);
+    }
+  };
+
+  // Ask Question Handler
+  const handleAsk = async (queryText = question, overrideMode = null, extraOptions = {}) => {
+    const query = (queryText || "").trim();
+    if (!query || asking) return;
+
+    const modeToUse = overrideMode || answerMode;
+
+    // Build previous context for follow-up awareness
+    let previousContext = null;
+    if (currentResult && currentResult.answer) {
+      previousContext = {
+        previous_question: currentResult.question || null,
+        previous_answer: currentResult.answer || null,
+        previous_sources: currentResult.sources || [],
+        previous_web_sources: currentResult.web_sources || [],
+        previous_diagrams: currentResult.diagrams || [],
+        previous_mode: currentResult.mode || modeToUse,
+        previous_page: currentResult.page || null,
+        previous_format: currentResult.answer_format || null,
+      };
     }
 
-    alert(`Question: ${question}`);
+    try {
+      setAsking(true);
+      setAskError("");
+
+      const res = await askQuery(query, modeToUse, explanationMode, {
+        answerLength: extraOptions.answerLength || answerLength,
+        examMarks: extraOptions.examMarks !== undefined ? extraOptions.examMarks : examMarks,
+        conversationId: conversationIdRef.current,
+        previousContext,
+      });
+
+      // Save the conversation_id from backend for session continuity
+      if (res.conversation_id) {
+        conversationIdRef.current = res.conversation_id;
+      }
+
+      setCurrentResult(res);
+
+      const newHistoryItem = {
+        id: `chat_${Date.now()}`,
+        question: query,
+        timestamp: "Just now",
+        mode: modeToUse,
+        fullResult: res,
+      };
+
+      setActiveChatId(newHistoryItem.id);
+      setChatHistory((prev) => [newHistoryItem, ...prev.filter((p) => p.question !== query).slice(0, 24)]);
+
+    } catch (err) {
+      console.error("Ask query error:", err);
+      setAskError(
+        err.response?.data?.detail ||
+          "Failed to retrieve verified response. Please verify that the backend is running at http://127.0.0.1:8000."
+      );
+    } finally {
+      setAsking(false);
+    }
   };
 
+  // ================= VIEW RENDERING =================
+  // If user is not authenticated, show Page 1 (AuthPage)
+  if (!user) {
+    return <AuthPage onLoginSuccess={(u) => setUser(u)} />;
+  }
+
+  // Otherwise, show Page 2 (Spacious AI Research Workspace)
   return (
-    <div className="app">
+    <div className={`accurag-app-shell ${theme}`}>
+      {/* Compact Top Navigation Bar */}
+      <TopNavbar
+        user={user}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+        onLogout={handleLogout}
+        backendOnline={backendOnline}
+        activeDoc={activeDoc}
+        onOpenDocLibrary={() => setDocModalOpen(true)}
+        onOpenSettings={() => setSettingsModalOpen(true)}
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
+        mobileSidebarOpen={mobileSidebarOpen}
+        onToggleMobileSidebar={() => setMobileSidebarOpen(!mobileSidebarOpen)}
+      />
 
-      {/* ================= SIDEBAR ================= */}
-
-      <aside className="sidebar">
-
-        {/* Logo */}
-
-        <div className="logo">
-
-          <div className="logo-icon">
-            ✦
-          </div>
-
-          <div className="logo-text">
-            Accu<span>RAG</span>
-          </div>
-
-        </div>
-
-
-        {/* New Chat */}
-
-        <button
-          className="new-chat"
-          onClick={handleNewChat}
-        >
-          ＋ &nbsp; New Chat
-        </button>
-
-
-        {/* Navigation */}
-
-        <nav className="nav">
-
-          {/* Search */}
-
-          <div
-            className="nav-item"
-            onClick={() => setActivePage("search")}
-          >
-            <span className="nav-icon">
-              ⌕
-            </span>
-
-            <span>
-              Search
-            </span>
-          </div>
-
-
-          {/* Documents */}
-
-          <div
-            className="nav-item"
-            onClick={() => setActivePage("documents")}
-          >
-            <span className="nav-icon">
-              ▣
-            </span>
-
-            <span>
-              Documents
-            </span>
-          </div>
-
-
-          {/* Upload PDF */}
-
-          <div
-            className="nav-item"
-            onClick={handleUploadClick}
-          >
-            <span className="nav-icon">
-              ↑
-            </span>
-
-            <span>
-              Upload PDF
-            </span>
-          </div>
-
-
-          {/* Sources */}
-
-          <div
-            className="nav-item"
-            onClick={() => setActivePage("sources")}
-          >
-            <span className="nav-icon">
-              ◇
-            </span>
-
-            <span>
-              Sources
-            </span>
-          </div>
-
-
-          {/* Chat History */}
-
-          <div
-            className="nav-item"
-            onClick={() => setActivePage("history")}
-          >
-            <span className="nav-icon">
-              ◷
-            </span>
-
-            <span>
-              Chat History
-            </span>
-          </div>
-
-        </nav>
-
-
-        {/* Hidden PDF input */}
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".pdf,application/pdf"
-          onChange={handleFileChange}
-          style={{ display: "none" }}
+      {/* Main Layout Area: Sidebar + Main Workspace */}
+      <div className="accurag-workspace-body">
+        {/* Left Narrow Collapsible Sidebar */}
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+          mobileOpen={mobileSidebarOpen}
+          onCloseMobile={() => setMobileSidebarOpen(false)}
+          chatHistory={chatHistory}
+          activeChatId={activeChatId}
+          onSelectChat={handleSelectChat}
+          onNewChat={handleNewChat}
+          onClearHistory={handleClearHistory}
+          onOpenDocLibrary={() => setDocModalOpen(true)}
+          onOpenSettings={() => setSettingsModalOpen(true)}
+          docCount={indexedDocs.length}
+          user={user}
+          onLogout={handleLogout}
         />
 
-
-        {/* Chat History */}
-
-        <div className="history">
-
-          <div className="history-title">
-            Today
-          </div>
-
-          <div className="history-item">
-            What is blockchain?
-          </div>
-
-          <div className="history-item">
-            Explain consensus...
-          </div>
-
-          <div className="history-item">
-            What is Hyperledger?
-          </div>
-
-          <div className="history-day">
-            Yesterday
-          </div>
-
-          <div className="history-item">
-            Explain smart contracts...
-          </div>
-
-          <div className="history-item">
-            What is a distributed ledger?
-          </div>
-
-        </div>
-
-      </aside>
-
-
-      {/* ================= MAIN ================= */}
-
-      <main className="main">
-
-        {/* =====================================
-            DOCUMENTS PAGE
-        ====================================== */}
-
-        {activePage === "documents" && (
-
-          <div className="documents-page">
-
-            <div className="documents-header">
-
-              <div>
-
-                <h1>
-                  Your Documents
-                </h1>
-
-                <p>
-                  PDFs available in your AccuRAG workspace
-                </p>
-
-              </div>
-
-
-              <button
-                className="document-upload-button"
-                onClick={handleUploadClick}
-              >
-                + Upload PDF
-              </button>
-
-            </div>
-
-
-            {selectedFile ? (
-
-              <div className="document-list">
-
-                <div className="document-item">
-
-                  <div className="document-icon">
-                    PDF
-                  </div>
-
-
-                  <div className="document-info">
-
-                    <h3>
-                      {selectedFile.name}
-                    </h3>
-
-                    <p>
-                      {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
-                    </p>
-
-                  </div>
-
-
-                  <div className="document-status">
-                    Ready
-                  </div>
-
-                </div>
-
-              </div>
-
-            ) : (
-
-              <div className="empty-documents">
-
-                <div className="empty-icon">
-                  ▣
-                </div>
-
-                <h2>
-                  No documents yet
-                </h2>
-
-                <p>
-                  Upload a PDF to start asking questions about it.
-                </p>
-
-                <button
-  className="document-upload-button"
-  onClick={handleUploadClick}
-  disabled={uploading}
->
-  {uploading ? "Uploading..." : "+ Upload PDF"}
-</button>
-
-              </div>
-
-            )}
-
-          </div>
-
-        )}
-
-
-        {/* =====================================
-            SEARCH PAGE
-        ====================================== */}
-
-        {activePage === "search" && (
-
-          <div className="documents-page">
-
-            <div className="documents-header">
-
-              <div>
-
-                <h1>
-                  Search
-                </h1>
-
-                <p>
-                  Search information across your documents.
-                </p>
-
-              </div>
-
-            </div>
-
-
-            <div className="chat-box">
-
-              <textarea
-                className="chat-input"
-                placeholder="Search your documents..."
-                value={question}
-                onChange={(e) =>
-                  setQuestion(e.target.value)
-                }
-              />
-
-              <div className="chat-bottom">
-
-                <div className="chat-left">
-                  <span className="mode">
-                    Document Search
-                  </span>
-                </div>
-
-                <button
-                  className="send-button"
-                  onClick={handleAsk}
-                >
-                  ↑
-                </button>
-
-              </div>
-
-            </div>
-
-          </div>
-
-        )}
-
-
-        {/* =====================================
-            SOURCES PAGE
-        ====================================== */}
-
-        {activePage === "sources" && (
-
-          <div className="documents-page">
-
-            <div className="documents-header">
-
-              <div>
-
-                <h1>
-                  Sources
-                </h1>
-
-                <p>
-                  Sources used to generate AccuRAG answers.
-                </p>
-
-              </div>
-
-            </div>
-
-
-            <div className="empty-documents">
-
-              <div className="empty-icon">
-                ◇
-              </div>
-
-              <h2>
-                No sources yet
-              </h2>
-
-              <p>
-                Sources will appear here after asking questions.
-              </p>
-
-            </div>
-
-          </div>
-
-        )}
-
-
-        {/* =====================================
-            CHAT HISTORY PAGE
-        ====================================== */}
-
-        {activePage === "history" && (
-
-          <div className="documents-page">
-
-            <div className="documents-header">
-
-              <div>
-
-                <h1>
-                  Chat History
-                </h1>
-
-                <p>
-                  Your previous conversations.
-                </p>
-
-              </div>
-
-            </div>
-
-
-            <div className="document-list">
-
-              <div className="document-item">
-
-                <div className="document-icon">
-                  Q
-                </div>
-
-                <div className="document-info">
-
-                  <h3>
-                    What is blockchain?
-                  </h3>
-
-                  <p>
-                    Today
-                  </p>
-
-                </div>
-
-              </div>
-
-
-              <div className="document-item">
-
-                <div className="document-icon">
-                  Q
-                </div>
-
-                <div className="document-info">
-
-                  <h3>
-                    Explain consensus
-                  </h3>
-
-                  <p>
-                    Today
-                  </p>
-
-                </div>
-
-              </div>
-
-            </div>
-
-          </div>
-
-        )}
-
-
-        {/* =====================================
-            HOME PAGE
-        ====================================== */}
-
-        {activePage === "home" && (
-
-          <>
-
-            {/* Top bar */}
-
-            <div className="topbar">
-
-              <button className="top-button">
-                ⌘
-              </button>
-
-              <button className="top-button">
-                ⋮
-              </button>
-
-              <div className="profile">
-                S
-              </div>
-
-            </div>
-
-
-            {/* Welcome */}
-
-            <section className="welcome">
-
-              <div className="ai-orb"></div>
-
-             <h1>
-  Welcome to <span>AccuRAG</span>
-</h1>
-
-<p>
-  Not Just Answers. Verified Intelligence.
-</p>
-
-            </section>
-
-
-            {/* Feature cards */}
-
-            <section className="features">
-
-
-              <div className="feature-card">
-
-                <div className="feature-icon">
-                  ◇
-                </div>
-
-                <h3>
-                  Document Analysis
-                </h3>
-
-                <p>
-                  Understand your PDFs and extract meaningful information.
-                </p>
-
-              </div>
-
-
-              <div className="feature-card">
-
-                <div className="feature-icon">
-                  ✦
-                </div>
-
-                <h3>
-                  Accurate Answers
-                </h3>
-
-                <p>
-                  Get answers grounded in the content of your documents.
-                </p>
-
-              </div>
-
-
-              <div className="feature-card">
-
-                <div className="feature-icon">
-                  ▣
-                </div>
-
-                <h3>
-                  Smart Sources
-                </h3>
-
-                <p>
-                  See the document pages used to generate each answer.
-                </p>
-
-              </div>
-
-
-              <div className="feature-card">
-
-                <div className="feature-icon">
-                  ⌕
-                </div>
-
-                <h3>
-                  Intelligent Search
-                </h3>
-
-                <p>
-                  Find relevant information quickly across your documents.
-                </p>
-
-              </div>
-
-
-            </section>
-
-
-            {/* Selected PDF */}
-
-            {selectedFile && (
-
-              <div
-                style={{
-                  maxWidth: "1000px",
-                  margin: "0 auto 20px",
-                  padding: "15px",
-                  border: "1px solid #303036",
-                  borderRadius: "14px",
-                  background: "#101012",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "15px"
-                }}
-              >
-
-                <div
-                  style={{
-                    color: "#a78bfa",
-                    fontWeight: "bold"
-                  }}
-                >
-                  PDF
-                </div>
-
-
-                <div style={{ flex: 1 }}>
-
-                  <div>
-                    {selectedFile.name}
-                  </div>
-
-                  <small style={{ color: "#777" }}>
-                    {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
-                  </small>
-
-                </div>
-
-
-                <button
-                  onClick={() => setSelectedFile(null)}
-                  style={{
-                    background: "transparent",
-                    border: "none",
-                    color: "#aaa",
-                    fontSize: "20px",
-                    cursor: "pointer"
-                  }}
-                >
-                  ×
-                </button>
-
-              </div>
-
-            )}
-
-
-            {/* Chat */}
-
-            <section className="chat-box">
-
-              <textarea
-                className="chat-input"
-                value={question}
-                onChange={(e) =>
-                  setQuestion(e.target.value)
-                }
-                onKeyDown={(e) => {
-
-                  if (
-                    e.key === "Enter" &&
-                    !e.shiftKey
-                  ) {
-
-                    e.preventDefault();
-
-                    handleAsk();
-
-                  }
-
-                }}
-                placeholder={
-                  selectedFile
-                    ? "Ask anything about your PDF..."
-                    : "Ask anything about your documents..."
-                }
-              />
-
-
-              <div className="chat-bottom">
-
-                <div className="chat-left">
-
-                  <button
-                    className="add-button"
-                    onClick={handleUploadClick}
-                  >
-                    +
-                  </button>
-
-                  <span className="mode">
-                    Smart⌄
-                  </span>
-
-                </div>
-
-
-                <button
-                  className="send-button"
-                  onClick={handleAsk}
-                >
-                  ↑
-                </button>
-
-              </div>
-
-            </section>
-
-          </>
-
-        )}
-
-      </main>
-
+        {/* Central Research Workspace */}
+        <main className="accurag-main-content">
+          <ChatArea
+            currentResult={currentResult}
+            question={question}
+            setQuestion={setQuestion}
+            onAsk={handleAsk}
+            asking={asking}
+            askError={askError}
+            answerMode={answerMode}
+            setAnswerMode={setAnswerMode}
+            explanationMode={explanationMode}
+            setExplanationMode={setExplanationMode}
+            answerLength={answerLength}
+            setAnswerLength={setAnswerLength}
+            examMarks={examMarks}
+            setExamMarks={setExamMarks}
+            onOpenDocUpload={() => setDocModalOpen(true)}
+            onOpenDocLibrary={() => setDocModalOpen(true)}
+            activeDoc={activeDoc}
+            onOpenLightbox={(url) => setLightboxUrl(url)}
+          />
+        </main>
+      </div>
+
+      {/* Document Library Modal */}
+      <DocumentModal
+        isOpen={docModalOpen}
+        onClose={() => setDocModalOpen(false)}
+        indexedDocs={indexedDocs}
+        setIndexedDocs={setIndexedDocs}
+        activeDoc={activeDoc}
+        setActiveDoc={setActiveDoc}
+      />
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={settingsModalOpen}
+        onClose={() => setSettingsModalOpen(false)}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+        backendOnline={backendOnline}
+      />
+
+      {/* Visual Evidence Lightbox Modal */}
+      <LightboxModal
+        imageUrl={lightboxUrl}
+        onClose={() => setLightboxUrl(null)}
+      />
     </div>
   );
 }
-
-export default App;
